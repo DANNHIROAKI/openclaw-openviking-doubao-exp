@@ -1,0 +1,51 @@
+{
+  "openclaw": {
+    "version": "2026.4.14",
+    "install_url": "https://openclaw.ai/install-cli.sh"
+  },
+  "openclaw_repo": {
+    "url": "https://github.com/openclaw/openclaw.git",
+    "ref_candidates": [
+      "2026.4.14",
+      "v2026.4.14",
+      "main"
+    ]
+  },
+  "openviking": {
+    "version": "0.3.8",
+    "pypi_spec": "openviking==0.3.8"
+  },
+  "bootstrap_repo": {
+    "url": "https://github.com/DANNHIROAKI/openclaw-openviking-doubao.git",
+    "ref": "main"
+  },
+  "dataset_repo": {
+    "url": "https://github.com/DANNHIROAKI/OpenViking-LoCoMo10.git",
+    "ref": "main",
+    "dataset_path": "data/openviking-locomo10-1540/locomo10_openviking_1540.json"
+  },
+  "official_docs": {
+    "openclaw": "https://github.com/openclaw/openclaw",
+    "openviking": "https://github.com/volcengine/OpenViking"
+  },
+  "experiment_defaults": {
+    "gateway_port_base": 18789,
+    "openviking_port_base": 1933,
+    "primary_model_ref": "arkapi/doubao-seed-2.0-code",
+    "ov_vlm_model": "doubao-seed-2.0-code",
+    "ov_embedding_model": "doubao-embedding-vision-251215",
+    "judge_model": "doubao-seed-2.0-code",
+    "tail": "[remember what's said, keep existing memory]"
+  },
+  "openviking_repo": {
+    "url": "https://github.com/volcengine/OpenViking.git",
+    "ref": "v0.3.8"
+  },
+  "bundled_plugin_snapshot": {
+    "path": "vendor/openclaw-openviking-doubao/plugin",
+    "metadata_path": "vendor/openclaw-openviking-doubao/SYNC_SOURCE.json",
+    "versions_lock_path": "vendor/openclaw-openviking-doubao/VERSIONS.lock",
+    "notice_path": "vendor/openclaw-openviking-doubao/NOTICE",
+    "preferred_for_install": true
+  }
+}

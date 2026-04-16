@@ -1,0 +1,9 @@
+openclaw_git_release=2026.4.14
+openclaw_npm_stable=2026.4.14
+openviking_pypi=0.3.8
+openviking_plugin_snapshot=v0.3.8/examples/openclaw-plugin
+mode=local
+provider=volcengine
+api_base=https://ark.cn-beijing.volces.com/api/v3
+embedding_model=doubao-embedding-vision-251215
+vlm_model=doubao-seed-2-0-pro-260215

@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+import requests
+
+from .common import extract_token_totals_from_vlm_status, write_json
+
+
+def extract_result(payload: dict[str, Any]) -> Any:
+    if isinstance(payload, dict) and "result" in payload:
+        return payload.get("result")
+    return payload
+
+
+@dataclass
+class OpenVikingClient:
+    base_url: str
+    api_key: str = ""
+    agent_id: str = ""
+    timeout_seconds: float = 20.0
+
+    def headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        if self.agent_id:
+            headers["X-OpenViking-Agent"] = self.agent_id
+        return headers
+
+    def get(self, path: str, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+        resp = requests.get(
+            f"{self.base_url.rstrip('/')}{path}",
+            headers=self.headers(),
+            timeout=timeout_seconds or self.timeout_seconds,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def post(self, path: str, body: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
+        resp = requests.post(
+            f"{self.base_url.rstrip('/')}{path}",
+            json=body,
+            headers=self.headers(),
+            timeout=timeout_seconds or self.timeout_seconds,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def health(self) -> bool:
+        try:
+            payload = self.get("/health", timeout_seconds=5.0)
+        except Exception:
+            return False
+        result = extract_result(payload)
+        if isinstance(result, dict):
+            if result.get("status") == "ok" or result.get("ok") is True:
+                return True
+        if isinstance(payload, dict) and payload.get("status") == "ok":
+            return True
+        return False
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        payload = self.get("/api/v1/sessions", timeout_seconds=15.0)
+        result = extract_result(payload)
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        return []
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        payload = self.get(f"/api/v1/sessions/{quote(session_id, safe='')}", timeout_seconds=15.0)
+        result = extract_result(payload)
+        return result if isinstance(result, dict) else None
+
+    def get_context(self, session_id: str, token_budget: int = 128000) -> dict[str, Any] | None:
+        payload = self.get(
+            f"/api/v1/sessions/{quote(session_id, safe='')}/context?token_budget={token_budget}",
+            timeout_seconds=20.0,
+        )
+        result = extract_result(payload)
+        return result if isinstance(result, dict) else None
+
+    def observer_system(self) -> dict[str, Any]:
+        return self.get("/api/v1/observer/system", timeout_seconds=10.0)
+
+    def observer_vlm(self) -> dict[str, Any]:
+        return self.get("/api/v1/observer/vlm", timeout_seconds=10.0)
+
+    def observer_queue(self) -> dict[str, Any]:
+        return self.get("/api/v1/observer/queue", timeout_seconds=10.0)
+
+    def wait_processed(self, timeout_seconds: float = 60.0) -> dict[str, Any]:
+        return self.post("/api/v1/system/wait", {"timeout": timeout_seconds}, timeout_seconds=timeout_seconds + 5.0)
+
+    def commit_session(self, session_id: str, wait: bool = False) -> dict[str, Any]:
+        wait_value = "true" if wait else "false"
+        return self.post(
+            f"/api/v1/sessions/{quote(session_id, safe='')}/commit?wait={wait_value}",
+            {},
+            timeout_seconds=(self.timeout_seconds + 300.0) if wait else self.timeout_seconds,
+        )
+
+
+def extract_memory_total(detail: dict[str, Any] | None) -> int:
+    if not isinstance(detail, dict):
+        return 0
+    memories = detail.get("memories_extracted")
+    if isinstance(memories, int):
+        return memories
+    if isinstance(memories, dict):
+        total = memories.get("total")
+        if isinstance(total, int):
+            return total
+        return sum(v for v in memories.values() if isinstance(v, int))
+    return 0
+
+
+def latest_real_session(client: OpenVikingClient) -> tuple[str | None, dict[str, Any] | None]:
+    sessions = client.list_sessions()
+    candidates = [item for item in sessions if not str(item.get("session_id", "")).startswith("memory-store-")]
+    candidates.sort(
+        key=lambda item: str(item.get("updated_at", "") or item.get("created_at", "")),
+        reverse=True,
+    )
+    if not candidates:
+        return None, None
+    item = candidates[0]
+    session_id = str(item.get("session_id", "")).strip() or None
+    return session_id, item
+
+
+def find_session_by_marker(
+    client: OpenVikingClient,
+    marker: str,
+    *,
+    token_budget: int = 128000,
+    session_scan_limit: int = 0,
+) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
+    sessions = client.list_sessions()
+    candidates = [item for item in sessions if not str(item.get("session_id", "")).startswith("memory-store-")]
+    candidates.sort(
+        key=lambda item: str(item.get("updated_at", "") or item.get("created_at", "")),
+        reverse=True,
+    )
+    if session_scan_limit > 0:
+        candidates = candidates[:session_scan_limit]
+    for item in candidates:
+        session_id = str(item.get("session_id", "") or "").strip()
+        if not session_id:
+            continue
+        try:
+            context = client.get_context(session_id, token_budget=token_budget)
+        except Exception:
+            continue
+        haystacks: list[str] = []
+        if isinstance(context, dict):
+            overview = context.get("latest_archive_overview")
+            if isinstance(overview, str):
+                haystacks.append(overview)
+            for msg in context.get("messages", []) if isinstance(context.get("messages"), list) else []:
+                if not isinstance(msg, dict):
+                    continue
+                for part in msg.get("parts", []) if isinstance(msg.get("parts"), list) else []:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        haystacks.append(part["text"])
+            for abstract in context.get("pre_archive_abstracts", []) if isinstance(context.get("pre_archive_abstracts"), list) else []:
+                if isinstance(abstract, str):
+                    haystacks.append(abstract)
+                elif isinstance(abstract, dict):
+                    for value in abstract.values():
+                        if isinstance(value, str):
+                            haystacks.append(value)
+        if any(marker in part for part in haystacks):
+            return session_id, item, context
+    return None, None, None
+
+
+def wait_for_commit_visibility(
+    *,
+    client: OpenVikingClient,
+    timeout_seconds: float = 300.0,
+    poll_seconds: float = 5.0,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    session_id, _item = latest_real_session(client)
+    if not session_id:
+        raise RuntimeError("No OpenViking session found in clean workspace.")
+    latest_detail: dict[str, Any] | None = None
+    latest_context: dict[str, Any] | None = None
+    commit_ok = False
+    overview_ok = False
+    memory_ok = False
+    while time.time() < deadline:
+        latest_detail = client.get_session(session_id)
+        latest_context = client.get_context(session_id)
+        commit_ok = (
+            isinstance(latest_detail, dict)
+            and isinstance(latest_detail.get("commit_count"), int)
+            and latest_detail["commit_count"] > 0
+        )
+        overview_ok = (
+            isinstance(latest_context, dict)
+            and isinstance(latest_context.get("latest_archive_overview"), str)
+            and bool(latest_context["latest_archive_overview"].strip())
+        )
+        memory_ok = extract_memory_total(latest_detail) > 0
+        if commit_ok and overview_ok and memory_ok:
+            return {
+                "session_id": session_id,
+                "detail": latest_detail,
+                "context": latest_context,
+                "commit_ok": True,
+                "overview_ok": True,
+                "memory_ok": True,
+            }
+        time.sleep(poll_seconds)
+    return {
+        "session_id": session_id,
+        "detail": latest_detail,
+        "context": latest_context,
+        "commit_ok": commit_ok,
+        "overview_ok": overview_ok,
+        "memory_ok": memory_ok,
+    }
+
+
+def _observer_status_text(payload: dict[str, Any]) -> str:
+    result = extract_result(payload)
+    if isinstance(result, dict):
+        for key in ("status", "table", "text"):
+            value = result.get(key)
+            if isinstance(value, str):
+                return value
+        return json.dumps(result, ensure_ascii=False)
+    if isinstance(result, str):
+        return result
+    return json.dumps(result, ensure_ascii=False)
+
+
+def capture_vlm_snapshot(client: OpenVikingClient) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {"ts": time.time()}
+    try:
+        vlm_payload = client.observer_vlm()
+        status_text = _observer_status_text(vlm_payload)
+        snapshot["observer_vlm"] = vlm_payload
+        snapshot["observer_vlm_status_text"] = status_text
+        snapshot["observer_vlm_parsed"] = extract_token_totals_from_vlm_status(status_text)
+    except Exception as exc:
+        snapshot["observer_vlm_error"] = str(exc)
+    return snapshot
+
+
+def capture_snapshot(client: OpenVikingClient) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "health": client.health(),
+        "ts": time.time(),
+    }
+    try:
+        system_payload = client.observer_system()
+        result["observer_system"] = system_payload
+    except Exception as exc:
+        result["observer_system_error"] = str(exc)
+    vlm_snapshot = capture_vlm_snapshot(client)
+    result.update(vlm_snapshot)
+    try:
+        queue_payload = client.observer_queue()
+        result["observer_queue"] = queue_payload
+    except Exception as exc:
+        result["observer_queue_error"] = str(exc)
+    try:
+        session_id, session_item = latest_real_session(client)
+        result["latest_session_item"] = session_item
+        result["latest_session_id"] = session_id
+    except Exception as exc:
+        result["latest_session_error"] = str(exc)
+    return result
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="OpenViking observer / barrier helper.")
+    sub = parser.add_subparsers(dest="mode", required=True)
+
+    wait_parser = sub.add_parser("wait", help="Wait for commit_count + archive overview + memories_extracted.")
+    wait_parser.add_argument("--base-url", required=True)
+    wait_parser.add_argument("--api-key", default="")
+    wait_parser.add_argument("--agent-id", default="")
+    wait_parser.add_argument("--timeout", type=float, default=300.0)
+    wait_parser.add_argument("--output", type=Path, required=True)
+
+    snap_parser = sub.add_parser("snapshot", help="Capture observer snapshots.")
+    snap_parser.add_argument("--base-url", required=True)
+    snap_parser.add_argument("--api-key", default="")
+    snap_parser.add_argument("--agent-id", default="")
+    snap_parser.add_argument("--output", type=Path, required=True)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    client = OpenVikingClient(base_url=args.base_url, api_key=args.api_key, agent_id=args.agent_id)
+    if args.mode == "wait":
+        result = wait_for_commit_visibility(client=client, timeout_seconds=args.timeout)
+        write_json(args.output, result)
+        print(
+            json.dumps(
+                {
+                    "session_id": result.get("session_id"),
+                    "commit_ok": result.get("commit_ok"),
+                    "overview_ok": result.get("overview_ok"),
+                    "memory_ok": result.get("memory_ok"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0 if result.get("commit_ok") and result.get("overview_ok") and result.get("memory_ok") else 1
+    if args.mode == "snapshot":
+        result = capture_snapshot(client)
+        write_json(args.output, result)
+        print(
+            json.dumps(
+                {
+                    "health": result.get("health"),
+                    "latest_session_id": result.get("latest_session_id"),
+                    "observer_vlm_totals": (
+                        result.get("observer_vlm_parsed", {})
+                        if isinstance(result.get("observer_vlm_parsed"), dict)
+                        else {}
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

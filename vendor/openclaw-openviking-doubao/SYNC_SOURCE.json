@@ -1,0 +1,10 @@
+{
+  "mode": "vendored",
+  "source_bundle": "openclaw-openviking-doubao-main-updated.zip",
+  "source_repo_name": "openclaw-openviking-doubao",
+  "source_notice_path": "vendor/openclaw-openviking-doubao/NOTICE",
+  "openclaw_version": "2026.4.14",
+  "openviking_version": "0.3.8",
+  "plugin_snapshot": "v0.3.8/examples/openclaw-plugin",
+  "copied_at_utc": "2026-04-15T14:18:17Z"
+}

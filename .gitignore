@@ -1,0 +1,9 @@
+# Runtime caches and outputs
+.venv/
+cache/
+artifacts/
+runs/
+workspace/
+__pycache__/
+*.pyc
+.env
