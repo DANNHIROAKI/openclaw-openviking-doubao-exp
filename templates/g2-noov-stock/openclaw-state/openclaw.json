@@ -1,0 +1,129 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/home/dhy/.openclaw/workspace",
+      "models": {
+        "volcengine-plan/ark-code-latest": {}
+      },
+      "model": {
+        "primary": "arkapi/ep-20260416162446-48fvm"
+      },
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "skipBootstrap": true,
+      "startupContext": {
+        "enabled": false
+      },
+      "contextInjection": "continuation-skip"
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "env",
+        "provider": "default",
+        "id": "OPENCLAW_GATEWAY_TOKEN"
+      }
+    },
+    "port": 18789,
+    "bind": "loopback",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "http": {
+      "endpoints": {
+        "responses": {
+          "enabled": true
+        },
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding"
+  },
+  "plugins": {
+    "entries": {
+      "volcengine": {
+        "enabled": true
+      },
+      "openviking": {
+        "enabled": false,
+        "config": {
+          "mode": "local",
+          "configPath": "/home/dhy/PhD/OpenViking-Exp/templates/g2-noov-stock/openviking-workspace/ov.conf",
+          "port": 1933,
+          "agentId": "template-g2-noov-stock",
+          "autoCapture": true,
+          "autoRecall": true,
+          "emitStandardDiagnostics": true,
+          "logFindRequests": true
+        }
+      }
+    },
+    "installs": {
+      "openviking": {
+        "source": "path",
+        "sourcePath": "/home/dhy/PhD/OpenViking-Exp/vendor/openclaw-openviking-doubao/plugin",
+        "installPath": "/home/dhy/PhD/OpenViking-Exp/workspace/base/openclaw-state/extensions/openviking",
+        "version": "2026.3.25",
+        "installedAt": "2026-04-16T15:14:41.324Z"
+      }
+    },
+    "slots": {
+      "contextEngine": "legacy",
+      "memory": "memory-core"
+    },
+    "deny": [
+      "openviking"
+    ]
+  },
+  "auth": {
+    "profiles": {
+      "volcengine:default": {
+        "provider": "volcengine",
+        "mode": "api_key"
+      }
+    }
+  },
+  "skills": {
+    "install": {
+      "nodeManager": "npm"
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-04-16T15:14:27.250Z",
+    "lastRunVersion": "2026.4.14",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.4.14",
+    "lastTouchedAt": "2026-04-16T15:14:46.977Z"
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "arkapi": {
+        "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+        "apiKey": "${VOLCANO_ENGINE_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "ep-20260416162446-48fvm",
+            "name": "ep-20260416162446-48fvm"
+          }
+        ]
+      }
+    }
+  }
+}

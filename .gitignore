@@ -1,9 +1,52 @@
-# Runtime caches and outputs
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
 .venv/
-cache/
+venv/
+env/
+ENV/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Experiment runtime outputs and intermediate data
 artifacts/
+cache/
 runs/
 workspace/
-__pycache__/
-*.pyc
-.env
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Log files and runtime traces
+*.log
+*.out
+*.pid
+*.seed
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -57,6 +57,43 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _seed_benchmark_workspace(path: Path) -> None:
+    ensure_dir(path)
+    ensure_dir(path / "memory")
+    files = {
+        "AGENTS.md": "# AGENTS.md\n\nThis workspace is used by a benchmark harness. Follow the current user request directly. Do not run onboarding or self-introduction rituals.\n",
+        "SOUL.md": "# SOUL.md\n\nNeutral, concise, task-focused.\n",
+        "IDENTITY.md": "# IDENTITY.md\n\n- Name: benchmark-assistant\n- Creature: assistant\n- Vibe: neutral and concise\n- Emoji: OK\n",
+        "USER.md": "# USER.md\n\n- Notes: benchmark user\n",
+        "TOOLS.md": "# TOOLS.md\n\nUse tools only when they are genuinely needed for the user's current request.\n",
+        "HEARTBEAT.md": "# HEARTBEAT.md\n\nBenchmark workspace: keep heartbeat empty.\n",
+        "MEMORY.md": "# MEMORY.md\n\nBenchmark workspace. No manual long-term notes are preloaded here.\n",
+    }
+    for rel, content in files.items():
+        write_text(path / rel, content)
+    bootstrap = path / "BOOTSTRAP.md"
+    if bootstrap.exists():
+        bootstrap.unlink()
+
+
+def prepare_default_benchmark_workspaces(state_dir: Path, agent_id: str = "main") -> list[Path]:
+    candidates: list[Path] = []
+    raw_candidates = [
+        state_dir / "workspace",
+        state_dir / f"workspace-{agent_id}",
+        state_dir / "agents" / agent_id / "workspace",
+    ]
+    seen: set[str] = set()
+    for candidate in raw_candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        _seed_benchmark_workspace(candidate)
+        candidates.append(candidate)
+    return candidates
+
+
 def append_jsonl(path: Path, item: Any) -> None:
     ensure_dir(path.parent)
     with path.open("a", encoding="utf-8") as handle:
@@ -242,6 +279,9 @@ def patch_openclaw_config(
     nested_set(patched, "plugins.entries.openviking.config.autoRecall", True)
     nested_set(patched, "plugins.entries.openviking.config.emitStandardDiagnostics", True)
     nested_set(patched, "plugins.entries.openviking.config.logFindRequests", True)
+    nested_set(patched, "agents.defaults.skipBootstrap", True)
+    nested_set(patched, "agents.defaults.startupContext.enabled", False)
+    nested_set(patched, "agents.defaults.contextInjection", "continuation-skip")
 
     # Force a custom OpenAI-compatible Ark provider instead of volcengine-plan.
     # This avoids Coding Plan alias / subscription routing mismatches and lets
@@ -255,14 +295,17 @@ def patch_openclaw_config(
     if not isinstance(providers, dict):
         providers = {}
         models["providers"] = providers
+    ark_model_id = "doubao-seed-2.0-code"
+    if primary_model_ref and primary_model_ref.startswith("arkapi/") and "/" in primary_model_ref:
+        ark_model_id = primary_model_ref.split("/", 1)[1]
     providers["arkapi"] = {
         "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
         "apiKey": "${VOLCANO_ENGINE_API_KEY}",
         "api": "openai-completions",
         "models": [
             {
-                "id": "doubao-seed-2.0-code",
-                "name": "Doubao Seed 2.0 Code",
+                "id": ark_model_id,
+                "name": ark_model_id,
             }
         ],
     }
@@ -286,16 +329,19 @@ def build_ov_conf(
             "port": port,
             "root_api_key": ""
         },
+        "memory": {"version": "v2"},
         "storage": {
             "workspace": str(workspace)
         },
         "embedding": {
+            "max_retries": 3,
             "dense": {
                 "backend": "volcengine",
                 "api_base": "https://ark.cn-beijing.volces.com/api/v3",
                 "api_key": volc_api_key,
                 "provider": "volcengine",
                 "model": embedding_model,
+                "dimension": 1024,
                 "input": "multimodal",
             }
         },

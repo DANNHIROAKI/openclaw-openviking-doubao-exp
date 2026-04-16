@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import time
+
+import requests
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ from .common import (
     build_ov_conf,
     command_version,
     copytree_clean,
+    prepare_default_benchmark_workspaces,
     elapsed_ms,
     ensure_dir,
     get_git_head,
@@ -83,6 +86,9 @@ class ExperimentOrchestrator:
             raise RuntimeError("VOLCANO_ENGINE_API_KEY is required.")
 
         self.gateway_token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "").strip() or random_token()
+        self.ark_llm_endpoint_id = os.environ.get("ARK_LLM_ENDPOINT_ID", "").strip()
+        self.ark_embedding_endpoint_id = os.environ.get("ARK_EMBEDDING_ENDPOINT_ID", "").strip()
+        self.ark_embedding_model = os.environ.get("ARK_EMBEDDING_MODEL", "").strip()
         self.primary_model_ref = (
             os.environ.get("OPENCLAW_PRIMARY_MODEL_REF", "").strip()
             or self.lock.get("experiment_defaults", {}).get("primary_model_ref", "")
@@ -97,9 +103,19 @@ class ExperimentOrchestrator:
             "",
         }:
             self.primary_model_ref = "arkapi/doubao-seed-2.0-code"
+        if self.ark_llm_endpoint_id:
+            self.primary_model_ref = f"arkapi/{self.ark_llm_endpoint_id}"
         self.judge_base_url = os.environ.get("JUDGE_BASE_URL", "").strip() or "https://ark.cn-beijing.volces.com/api/v3"
         self.judge_api_key = os.environ.get("JUDGE_API_KEY", "").strip() or self.volcano_api_key
         self.judge_model = os.environ.get("JUDGE_MODEL", "").strip() or self.lock.get("experiment_defaults", {}).get("judge_model", "")
+        if self.ark_llm_endpoint_id and not os.environ.get("JUDGE_MODEL", "").strip():
+            self.judge_model = self.ark_llm_endpoint_id
+        if self.ark_llm_endpoint_id:
+            self.lock.setdefault("experiment_defaults", {})["ov_vlm_model"] = self.ark_llm_endpoint_id
+        if self.ark_embedding_endpoint_id:
+            self.ark_embedding_model = self.ark_embedding_endpoint_id
+        if self.ark_embedding_model:
+            self.lock.setdefault("experiment_defaults", {})["ov_embedding_model"] = self.ark_embedding_model
 
         self.workspace_root = Path(os.environ.get("EXP_WORKSPACE_ROOT") or (root / "workspace"))
         self.cache_root = root / "cache"
@@ -164,6 +180,69 @@ class ExperimentOrchestrator:
         if extra:
             env.update(extra)
         return env
+
+    def validate_embedding_model_access(self) -> None:
+        embedding_model = str(self.lock.get("experiment_defaults", {}).get("ov_embedding_model", "") or "").strip()
+        if not embedding_model:
+            raise RuntimeError("OpenViking embedding model is empty. Set ARK_EMBEDDING_MODEL or ARK_EMBEDDING_ENDPOINT_ID.")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.volcano_api_key}",
+        }
+        attempts: list[tuple[str, dict[str, Any], str]] = [
+            (
+                "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal",
+                {
+                    "model": embedding_model,
+                    "input": [
+                        {"type": "text", "text": "openviking embedding probe"}
+                    ],
+                },
+                "multimodal",
+            ),
+            (
+                "https://ark.cn-beijing.volces.com/api/v3/embeddings",
+                {
+                    "model": embedding_model,
+                    "input": ["openviking embedding probe"],
+                },
+                "text",
+            ),
+        ]
+
+        failures: list[str] = []
+        for url, payload, mode in attempts:
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                if resp.status_code >= 400:
+                    failures.append(f"{mode} endpoint -> HTTP {resp.status_code}: {(resp.text or '')[:800]}")
+                    continue
+                body = resp.json()
+            except Exception as exc:  # pragma: no cover - runtime network path
+                failures.append(f"{mode} endpoint -> exception: {exc}")
+                continue
+
+            data = body.get("data") if isinstance(body, dict) else None
+            ok = False
+            if isinstance(data, dict) and isinstance(data.get("embedding"), list) and data.get("embedding"):
+                ok = True
+            elif isinstance(data, list) and data:
+                first = data[0]
+                ok = isinstance(first, dict) and isinstance(first.get("embedding"), list) and bool(first.get("embedding"))
+            if ok:
+                self.log(f"Embedding probe succeeded via {mode} endpoint for model {embedding_model}.")
+                return
+            failures.append(f"{mode} endpoint -> unexpected response: {body!r}")
+
+        raise RuntimeError(
+            "OpenViking embedding precheck failed. "
+            f"Model={embedding_model}. "
+            "This runner can now probe both multimodal and text embedding APIs, but neither succeeded. "
+            "Confirm that the embedding model is activated and keep ARK_EMBEDDING_MODEL / ARK_EMBEDDING_ENDPOINT_ID pointed at a working model or endpoint. "
+            f"Attempts: {' | '.join(failures)}"
+        )
+
 
     def preflight(self) -> dict[str, Any]:
         required = ["bash", "git", "curl", "node", "npm", "python3"]
@@ -417,6 +496,7 @@ class ExperimentOrchestrator:
         force = os.environ.get("EXP_FORCE_REBOOTSTRAP", "0").strip() == "1"
         bootstrap_marker = self.base_state_dir / ".bootstrap_complete.json"
         if bootstrap_marker.exists() and not force:
+            prepare_default_benchmark_workspaces(self.base_state_dir)
             self.log("Reusing existing bootstrapped base OpenClaw state.")
             return
         if force and self.base_state_dir.exists():
@@ -497,6 +577,7 @@ class ExperimentOrchestrator:
             primary_model_ref=self.primary_model_ref,
         )
         write_json(self.base_config_path, patched)
+        prepare_default_benchmark_workspaces(self.base_state_dir)
         write_json(bootstrap_marker, {"completed_at": utc_now_iso_ms()})
 
     def clean_template_state(self, state_dir: Path) -> None:
@@ -539,6 +620,7 @@ class ExperimentOrchestrator:
                 primary_model_ref=self.primary_model_ref,
             )
             write_json(config_path, patched)
+            prepare_default_benchmark_workspaces(template_state_dir)
 
             redacted_config = json_redact(patched)
             write_json(self.configs_root / f"group-{group_id}.openclaw.json", redacted_config)
@@ -628,6 +710,7 @@ class ExperimentOrchestrator:
             primary_model_ref=self.primary_model_ref,
         )
         write_json(run_config_path, patched)
+        prepare_default_benchmark_workspaces(run_state_dir)
 
         write_env_file(
             run_state_dir / ".env",
@@ -796,7 +879,11 @@ class ExperimentOrchestrator:
         proc: subprocess.Popen[str] | None = None
         try:
             proc = self.spawn_gateway(run_env=env, gateway_port=gateway_port, log_path=log_path)
-            wait_for_gateway_health(f"http://127.0.0.1:{gateway_port}", self.gateway_token, timeout_seconds=180.0)
+            try:
+                wait_for_gateway_health(f"http://127.0.0.1:{gateway_port}", self.gateway_token, timeout_seconds=180.0)
+            except Exception as exc:
+                detail = self.build_health_failure_detail(openclaw_log_path=log_path, run_dir=run_dir)
+                raise RuntimeError(f"{exc}\n" + detail)
             client = OpenVikingClient(base_url=f"http://127.0.0.1:{openviking_port}", api_key="", agent_id=run_id)
             deadline = time.time() + 60
             while time.time() < deadline and not client.health():
@@ -806,15 +893,29 @@ class ExperimentOrchestrator:
                 raise RuntimeError("OpenViking local service did not become healthy in smoke check.\n" + detail)
 
             probe = f"probe-{int(time.time())}-{random.randint(1000, 9999)}"
-            prefix = f"[OPENVIKING-HEALTHCHECK][{probe}]"
+            prefix = (
+                "[OPENVIKING-HEALTHCHECK] This is an automated healthcheck. "
+                "All data below is synthetic and should be ignored after the check completes. "
+                f"Probe marker: {probe}. "
+            )
             user = f"ov-smoke-{int(time.time())}"
             msgs = [
-                f"{prefix} Synthetic memory seed: my stack is Go + PostgreSQL + Redis. Please just acknowledge.",
-                f"{prefix} Synthetic memory seed: project progress is 70 percent and the current release branch is feature/ov-metrics. Please just acknowledge.",
-                f"{prefix} Synthetic memory seed: our Kafka topic is order_events_v2 and the callback endpoint is payment-cb.internal:9443. Please just acknowledge.",
-                f"{prefix} Synthetic memory seed: this is test data for plugin healthcheck only. Please just acknowledge.",
+                prefix
+                + "Please remember the following SYNTHETIC test data: "
+                "my name is Lin Zhou, I am rebuilding an order platform, "
+                "my backend stack is Go, PostgreSQL, and Redis, and the current project progress is 70 percent. "
+                "Reply briefly.",
+                "[OPENVIKING-HEALTHCHECK] More synthetic test data for the same probe session. "
+                "Our Kafka topic is order_events_v2, "
+                "the payment callback service runs on payment-cb.internal:9443, "
+                "and the main latency alert is P99 over 450ms for 3 minutes.",
+                "[OPENVIKING-HEALTHCHECK] Additional synthetic test data. "
+                "The inventory service exhausted its connection pool. "
+                "We fixed it by raising max_open_conns from 80 to 160 and by adding a circuit breaker.",
+                "[OPENVIKING-HEALTHCHECK] Synthetic preference for this test session only: "
+                "keep answers concise, put the conclusion first, then the reason if needed.",
             ]
-            for msg in msgs:
+            for idx, msg in enumerate(msgs, start=1):
                 result = send_message_with_retry(
                     base_url=f"http://127.0.0.1:{gateway_port}",
                     token=self.gateway_token,
@@ -822,11 +923,9 @@ class ExperimentOrchestrator:
                     message=msg,
                 )
                 if result.get("error"):
-                    raise RuntimeError(f"Smoke ingest failed: {result['error']}")
-                session_id = get_session_id(run_state_dir, user)
-                if session_id:
-                    reset_session(run_state_dir, session_id)
-                time.sleep(1.0)
+                    raise RuntimeError(f"Smoke ingest failed at turn {idx}: {result['error']}")
+                if idx < len(msgs):
+                    time.sleep(1.0)
 
             time.sleep(4.0)
             smoke_session_id, _item, _context = find_session_by_marker(client, probe, session_scan_limit=12)
@@ -844,7 +943,7 @@ class ExperimentOrchestrator:
             except Exception:
                 pass
 
-            barrier = wait_for_commit_visibility(client=client, timeout_seconds=300.0)
+            barrier = wait_for_commit_visibility(client=client, session_id=smoke_session_id, timeout_seconds=300.0)
             if not (barrier.get("commit_ok") and barrier.get("overview_ok") and barrier.get("memory_ok")):
                 detail = self.build_health_failure_detail(openclaw_log_path=log_path, run_dir=run_dir)
                 raise RuntimeError(f"Smoke barrier failed: {json.dumps(barrier, ensure_ascii=False)}\n" + detail)
@@ -853,7 +952,10 @@ class ExperimentOrchestrator:
                 base_url=f"http://127.0.0.1:{gateway_port}",
                 token=self.gateway_token,
                 user=user,
-                message="What is my stack and project progress?",
+                message=(
+                    "[OPENVIKING-HEALTHCHECK] Based on the synthetic test data above, "
+                    "summarize the backend stack and current project progress in one short sentence."
+                ),
             )
             answer_text = answer.get("text", "")
             lowered = answer_text.lower()
@@ -864,7 +966,10 @@ class ExperimentOrchestrator:
                 base_url=f"http://127.0.0.1:{gateway_port}",
                 token=self.gateway_token,
                 user=f"{user}-fresh",
-                message="From my earlier synthetic notes, what Kafka topic and callback endpoint did I mention?",
+                message=(
+                    "[OPENVIKING-HEALTHCHECK] Based on the synthetic test data from the healthcheck, "
+                    "reply with the Kafka topic and payment callback service address in one line."
+                ),
             )
             fresh_text = fresh.get("text", "")
             fresh_lower = fresh_text.lower()
@@ -972,7 +1077,11 @@ class ExperimentOrchestrator:
 
                         openclaw_log_path = self.logs_root / "openclaw" / group_id / f"{sample_id}__r{rerun}.log"
                         proc = self.spawn_gateway(run_env=run_env, gateway_port=gateway_port, log_path=openclaw_log_path)
-                        wait_for_gateway_health(f"http://127.0.0.1:{gateway_port}", self.gateway_token, timeout_seconds=180.0)
+                        try:
+                            wait_for_gateway_health(f"http://127.0.0.1:{gateway_port}", self.gateway_token, timeout_seconds=180.0)
+                        except Exception as exc:
+                            detail = self.build_health_failure_detail(openclaw_log_path=openclaw_log_path, run_dir=run_dir)
+                            raise RuntimeError(f"{exc}\n" + detail)
 
                         ov_client: OpenVikingClient | None = None
                         ov_snapshots: dict[str, Any] = {}
@@ -1022,7 +1131,7 @@ class ExperimentOrchestrator:
                             except Exception as exc:
                                 ov_snapshots["wait_processed_error"] = str(exc)
                             barrier_start = time.time()
-                            barrier = wait_for_commit_visibility(client=ov_client, timeout_seconds=300.0)
+                            barrier = wait_for_commit_visibility(client=ov_client, session_id=ingest_session_id, timeout_seconds=300.0)
                             barrier_end = time.time()
                             ov_barrier_wait_ms = elapsed_ms(barrier_start, barrier_end)
                             ov_snapshots["post_ingest_barrier"] = barrier
@@ -1176,6 +1285,7 @@ class ExperimentOrchestrator:
             "openviking_version": openviking_version,
         }
         self.assert_locked_versions(openclaw_version, openviking_version)
+        self.validate_embedding_model_access()
         self.bootstrap_base_state()
         self.build_templates()
         self.run_smoke_check()
