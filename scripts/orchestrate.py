@@ -575,6 +575,7 @@ class ExperimentOrchestrator:
             agent_id="bootstrap-base",
             gateway_port=self.lock["experiment_defaults"]["gateway_port_base"],
             primary_model_ref=self.primary_model_ref,
+            workspace_path=str(self.base_state_dir / "workspace"),
         )
         write_json(self.base_config_path, patched)
         prepare_default_benchmark_workspaces(self.base_state_dir)
@@ -618,6 +619,7 @@ class ExperimentOrchestrator:
                 agent_id=f"template-{group_id}",
                 gateway_port=self.lock["experiment_defaults"]["gateway_port_base"],
                 primary_model_ref=self.primary_model_ref,
+                workspace_path=str(template_state_dir / "workspace"),
             )
             write_json(config_path, patched)
             prepare_default_benchmark_workspaces(template_state_dir)
@@ -638,6 +640,8 @@ class ExperimentOrchestrator:
     def run_env(self, run_state_dir: Path, run_config_path: Path, run_ov_conf_path: Path) -> dict[str, str]:
         return self.cli_env(
             {
+                "HOME": str(run_state_dir.parent / ".runtime-home"),
+                "OPENCLAW_HOME": str(run_state_dir.parent / ".runtime-home"),
                 "OPENCLAW_STATE_DIR": str(run_state_dir),
                 "OPENCLAW_CONFIG_PATH": str(run_config_path),
                 "OPENVIKING_PYTHON": str(self.openviking_tool_venv / "bin" / "python"),
@@ -708,6 +712,7 @@ class ExperimentOrchestrator:
             agent_id=run_id,
             gateway_port=gateway_port,
             primary_model_ref=self.primary_model_ref,
+            workspace_path=str(run_state_dir / "workspace"),
         )
         write_json(run_config_path, patched)
         prepare_default_benchmark_workspaces(run_state_dir)

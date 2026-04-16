@@ -61,13 +61,13 @@ def _seed_benchmark_workspace(path: Path) -> None:
     ensure_dir(path)
     ensure_dir(path / "memory")
     files = {
-        "AGENTS.md": "# AGENTS.md\n\nThis workspace is used by a benchmark harness. Follow the current user request directly. Do not run onboarding or self-introduction rituals.\n",
+        "AGENTS.md": "# AGENTS.md\n\nThis workspace is used by a benchmark harness. Follow the current user request directly. Do not run onboarding or self-introduction rituals. During benchmark ingest and QA, do not create, edit, read, or maintain memory/note/log files unless the user explicitly asks for a file operation. Rely on the configured OpenClaw/OpenViking memory pipeline instead of manual note-taking.\n",
         "SOUL.md": "# SOUL.md\n\nNeutral, concise, task-focused.\n",
         "IDENTITY.md": "# IDENTITY.md\n\n- Name: benchmark-assistant\n- Creature: assistant\n- Vibe: neutral and concise\n- Emoji: OK\n",
         "USER.md": "# USER.md\n\n- Notes: benchmark user\n",
-        "TOOLS.md": "# TOOLS.md\n\nUse tools only when they are genuinely needed for the user's current request.\n",
+        "TOOLS.md": "# TOOLS.md\n\nUse tools only when they are genuinely needed for the user's current request. Never use tools just to \"remember\", summarize, or persist conversation content.\n",
         "HEARTBEAT.md": "# HEARTBEAT.md\n\nBenchmark workspace: keep heartbeat empty.\n",
-        "MEMORY.md": "# MEMORY.md\n\nBenchmark workspace. No manual long-term notes are preloaded here.\n",
+        "MEMORY.md": "# MEMORY.md\n\nBenchmark workspace. No manual long-term notes are allowed here during formal runs.\n",
     }
     for rel, content in files.items():
         write_text(path / rel, content)
@@ -262,6 +262,7 @@ def patch_openclaw_config(
     agent_id: str,
     gateway_port: int,
     primary_model_ref: str | None,
+    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     patched = json.loads(json.dumps(config))
     nested_set(patched, "gateway.http.endpoints.responses.enabled", True)
@@ -282,7 +283,8 @@ def patch_openclaw_config(
     nested_set(patched, "agents.defaults.skipBootstrap", True)
     nested_set(patched, "agents.defaults.startupContext.enabled", False)
     nested_set(patched, "agents.defaults.contextInjection", "continuation-skip")
-
+    if workspace_path:
+        nested_set(patched, "agents.defaults.workspace", workspace_path)
     # Force a custom OpenAI-compatible Ark provider instead of volcengine-plan.
     # This avoids Coding Plan alias / subscription routing mismatches and lets
     # OpenClaw call the exact Ark model that the experiment requires.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,8 @@ from .common import (
 )
 from .experiment_spec import EXPECTED_CASE_COUNT, EXPECTED_SAMPLE_COUNT
 from .openviking_probe import capture_vlm_snapshot
+
+DEFAULT_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300") or "300")
 
 
 def format_locomo_message(msg: dict[str, Any]) -> str:
@@ -242,7 +245,7 @@ def send_message(
     token: str,
     user: str,
     message: str,
-    timeout_seconds: float = 300.0,
+    timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/v1/responses"
     headers = {
@@ -273,7 +276,7 @@ def send_message_with_retry(
     token: str,
     user: str,
     message: str,
-    timeout_seconds: float = 300.0,
+    timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     retries: int = 2,
 ) -> dict[str, Any]:
     overall_start = time.time()
