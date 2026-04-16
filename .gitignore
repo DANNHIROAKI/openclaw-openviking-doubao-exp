@@ -32,6 +32,7 @@ build/
 artifacts/
 cache/
 runs/
+templates/
 workspace/
 logs/
 tmp/
