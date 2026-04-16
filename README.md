@@ -1,6 +1,6 @@
 # OpenViking × OpenClaw LoCoMo10 Experiment Bundle
 
-这个仓库是一个**严格对齐 v2 正式实验计划**的可执行实验编排包。配置好环境变量后，执行：
+配置好环境变量后，执行：
 
 ```bash
 bash run.sh
@@ -29,7 +29,7 @@ bash run.sh
 | G2 | No-OV / stock | `memory-core` | `legacy` | `false` | `["openviking"]` |
 | G3 | OV / stock | `memory-core` | `openviking` | `true` | `[]` |
 
-仓库已经按 v2 方案落实以下约束：
+仓库已落实以下约束：
 
 - 正式数据集固定为 **1540-case** 清洗版 LoCoMo10
 - 正式入口固定为 **OpenClaw Gateway `/v1/responses`**
