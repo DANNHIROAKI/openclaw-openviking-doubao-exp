@@ -39,7 +39,12 @@ tmp/
 temp/
 *.tmp
 *.bak
+*.bak2
+*.bak3
 *.bak4
+*.bak5
+*.bak6
+*.bak7
 
 # Log files and runtime traces
 *.log
