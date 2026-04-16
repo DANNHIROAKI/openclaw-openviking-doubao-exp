@@ -60,7 +60,7 @@
         "enabled": false,
         "config": {
           "mode": "local",
-          "configPath": "/home/dhy/PhD/OpenViking-Exp/templates/g2-noov-stock/openviking-workspace/ov.conf",
+          "configPath": "/home/dhy/PhD/openclaw-openviking-doubao-exp/templates/g2-noov-stock/openviking-workspace/ov.conf",
           "port": 1933,
           "agentId": "template-g2-noov-stock",
           "autoCapture": true,
@@ -73,10 +73,10 @@
     "installs": {
       "openviking": {
         "source": "path",
-        "sourcePath": "/home/dhy/PhD/OpenViking-Exp/vendor/openclaw-openviking-doubao/plugin",
-        "installPath": "/home/dhy/PhD/OpenViking-Exp/workspace/base/openclaw-state/extensions/openviking",
+        "sourcePath": "/home/dhy/PhD/openclaw-openviking-doubao-exp/vendor/openclaw-openviking-doubao/plugin",
+        "installPath": "/home/dhy/PhD/openclaw-openviking-doubao-exp/workspace/base/openclaw-state/extensions/openviking",
         "version": "2026.3.25",
-        "installedAt": "2026-04-16T15:14:41.324Z"
+        "installedAt": "2026-04-16T19:46:53.001Z"
       }
     },
     "slots": {
@@ -101,14 +101,14 @@
     }
   },
   "wizard": {
-    "lastRunAt": "2026-04-16T15:14:27.250Z",
+    "lastRunAt": "2026-04-16T19:46:40.464Z",
     "lastRunVersion": "2026.4.14",
     "lastRunCommand": "onboard",
     "lastRunMode": "local"
   },
   "meta": {
     "lastTouchedVersion": "2026.4.14",
-    "lastTouchedAt": "2026-04-16T15:14:46.977Z"
+    "lastTouchedAt": "2026-04-16T19:46:59.218Z"
   },
   "models": {
     "mode": "merge",
