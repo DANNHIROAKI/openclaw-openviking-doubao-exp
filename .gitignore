@@ -38,13 +38,10 @@ logs/
 tmp/
 temp/
 *.tmp
+# Local/editor backups: .bak, .bak2, .bak10, .bak.1, etc.
 *.bak
-*.bak2
-*.bak3
-*.bak4
-*.bak5
-*.bak6
-*.bak7
+*.bak[0-9]*
+*.bak.*
 
 # Log files and runtime traces
 *.log
