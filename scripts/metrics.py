@@ -29,6 +29,13 @@ SAMPLE_INGEST_FIELDS = [
     "ingest_output_tokens_total",
     "ingest_total_tokens_total",
     "ov_barrier_wait_ms",
+    "ov_target_session_count",
+    "ov_all_commit_ok",
+    "ov_all_overview_ok",
+    "ov_any_memory_extracted",
+    "ov_all_sessions_memory_extracted",
+    "ov_total_memories_extracted",
+    "ov_formal_barrier_requires_memory",
     "post_reset_quiet_wait_ms",
     "formal_usage_complete",
 ]
@@ -323,6 +330,13 @@ def materialize_run_metrics(
         "ingest_output_tokens_total": ingest_output_total,
         "ingest_total_tokens_total": ingest_total_total,
         "ov_barrier_wait_ms": int(ingest_stage.get("ov_barrier_wait_ms", 0) or 0),
+        "ov_target_session_count": int(ingest_stage.get("ov_target_session_count", 0) or 0),
+        "ov_all_commit_ok": bool(ingest_stage.get("ov_all_commit_ok", group_id == "g2-noov-stock")),
+        "ov_all_overview_ok": bool(ingest_stage.get("ov_all_overview_ok", group_id == "g2-noov-stock")),
+        "ov_any_memory_extracted": bool(ingest_stage.get("ov_any_memory_extracted", False)),
+        "ov_all_sessions_memory_extracted": bool(ingest_stage.get("ov_all_sessions_memory_extracted", False)),
+        "ov_total_memories_extracted": int(ingest_stage.get("ov_total_memories_extracted", 0) or 0),
+        "ov_formal_barrier_requires_memory": bool(ingest_stage.get("ov_formal_barrier_requires_memory", False)),
         "post_reset_quiet_wait_ms": int(ingest_stage.get("post_reset_quiet_wait_ms", 0) or 0),
         "formal_usage_complete": bool(
             ingest_stage.get("formal_usage_complete", True)

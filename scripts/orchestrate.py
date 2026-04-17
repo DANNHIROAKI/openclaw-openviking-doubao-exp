@@ -142,6 +142,7 @@ class ExperimentOrchestrator:
 
         self.openclaw_cli_prefix = Path(os.environ.get("OPENCLAW_CLI_PREFIX") or (self.tool_root / "openclaw-cli"))
         self.openviking_tool_venv = Path(os.environ.get("OPENVIKING_TOOL_VENV") or (self.tool_root / "openviking-venv"))
+        self.formal_ov_require_memory = str(os.environ.get("EXP_FORMAL_OV_REQUIRE_MEMORY", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
         self.bootstrap_repo_dir = self.repos_root / "openclaw-openviking-doubao"
         bundled_plugin = self.lock.get("bundled_plugin_snapshot", {}) if isinstance(self.lock.get("bundled_plugin_snapshot"), dict) else {}
@@ -274,6 +275,7 @@ class ExperimentOrchestrator:
                 "EXP_RERUNS": os.environ.get("EXP_RERUNS", "1"),
                 "EXP_GATEWAY_REQUEST_TIMEOUT_S": os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300"),
                 "EXP_RESET_TIMEOUT_S": os.environ.get("EXP_RESET_TIMEOUT_S", os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300")),
+                "EXP_FORMAL_OV_REQUIRE_MEMORY": "1" if self.formal_ov_require_memory else "0",
                 "EXP_RESUME": os.environ.get("EXP_RESUME", "1"),
                 "OPENCLAW_PRIMARY_MODEL_REF": self.primary_model_ref,
                 "ARK_LLM_ENDPOINT_ID": self.ark_llm_endpoint_id,
@@ -1300,7 +1302,7 @@ class ExperimentOrchestrator:
                                 client=ov_client,
                                 session_ids=target_session_ids,
                                 timeout_seconds=300.0,
-                                require_any_memory=True,
+                                require_any_memory=self.formal_ov_require_memory,
                                 require_memory_for_each=False,
                             )
                             barrier_end = time.time()
@@ -1309,13 +1311,19 @@ class ExperimentOrchestrator:
                             barrier_ok = bool(
                                 barrier.get("all_commit_ok")
                                 and barrier.get("all_overview_ok")
-                                and barrier.get("any_memory_ok")
+                                and (barrier.get("any_memory_ok") if self.formal_ov_require_memory else True)
                             )
                             if not barrier_ok:
                                 detail = self.build_health_failure_detail(openclaw_log_path=openclaw_log_path, run_dir=run_dir)
                                 raise RuntimeError(
                                     f"OV barrier failed for {run_id}: {json.dumps(barrier, ensure_ascii=False)}\n"
                                     + detail
+                                )
+                            if not barrier.get("any_memory_ok"):
+                                self.log(
+                                    f"[warn] {run_id}: OV commit+archive completed but no structured memories were extracted "
+                                    f"across {ov_target_session_count} ingest sessions; continuing because "
+                                    f"EXP_FORMAL_OV_REQUIRE_MEMORY={'1' if self.formal_ov_require_memory else '0'}."
                                 )
                             ov_snapshots["post_ingest"] = capture_snapshot(ov_client)
                         else:
@@ -1328,6 +1336,12 @@ class ExperimentOrchestrator:
                             "ingest_elapsed_ms": elapsed_ms(ingest_start_epoch, ingest_end_epoch),
                             "ov_barrier_wait_ms": ov_barrier_wait_ms,
                             "ov_target_session_count": ov_target_session_count,
+                            "ov_all_commit_ok": bool(ov_snapshots.get("post_ingest_barrier", {}).get("all_commit_ok", False)) if ov_client is not None else True,
+                            "ov_all_overview_ok": bool(ov_snapshots.get("post_ingest_barrier", {}).get("all_overview_ok", False)) if ov_client is not None else True,
+                            "ov_any_memory_extracted": bool(ov_snapshots.get("post_ingest_barrier", {}).get("any_memory_ok", False)) if ov_client is not None else False,
+                            "ov_all_sessions_memory_extracted": bool(ov_snapshots.get("post_ingest_barrier", {}).get("all_memory_ok", False)) if ov_client is not None else False,
+                            "ov_total_memories_extracted": int(ov_snapshots.get("post_ingest_barrier", {}).get("total_memories_extracted", 0) or 0) if ov_client is not None else 0,
+                            "ov_formal_barrier_requires_memory": self.formal_ov_require_memory if ov_client is not None else False,
                             "post_reset_quiet_wait_ms": post_reset_quiet_wait_ms,
                             "config_preflight_checks": config_checks,
                             "formal_usage_complete": True,

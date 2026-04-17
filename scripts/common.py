@@ -313,6 +313,16 @@ def patch_openclaw_config(
     nested_set(patched, "agents.defaults.contextInjection", "continuation-skip")
     if workspace_path:
         nested_set(patched, "agents.defaults.workspace", workspace_path)
+
+    memory_slot = str(group.get("plugins.slots.memory", "") or "").strip().lower()
+    if memory_slot == "none":
+        # Keep the no-memory group truly no-memory. OpenClaw 2026.4.x can still
+        # persist/reset session notes through its bundled session-memory hook and
+        # pre-compaction memory flush even when plugins.slots.memory == none.
+        nested_set(patched, "hooks.internal.entries.session-memory.enabled", False)
+        nested_set(patched, "hooks.internal.entries.session-memory.llmSlug", False)
+        nested_set(patched, "agents.defaults.memorySearch.experimental.sessionMemory", False)
+        nested_set(patched, "agents.defaults.compaction.memoryFlush.enabled", False)
     # Force a custom OpenAI-compatible Ark provider instead of volcengine-plan.
     # This avoids Coding Plan alias / subscription routing mismatches and lets
     # OpenClaw call the exact Ark model that the experiment requires.
