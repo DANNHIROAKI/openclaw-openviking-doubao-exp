@@ -273,6 +273,7 @@ class ExperimentOrchestrator:
                 "EXP_GROUP_FILTER": os.environ.get("EXP_GROUP_FILTER", ""),
                 "EXP_RERUNS": os.environ.get("EXP_RERUNS", "1"),
                 "EXP_GATEWAY_REQUEST_TIMEOUT_S": os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300"),
+                "EXP_RESET_TIMEOUT_S": os.environ.get("EXP_RESET_TIMEOUT_S", os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300")),
                 "EXP_RESUME": os.environ.get("EXP_RESUME", "1"),
                 "OPENCLAW_PRIMARY_MODEL_REF": self.primary_model_ref,
                 "ARK_LLM_ENDPOINT_ID": self.ark_llm_endpoint_id,

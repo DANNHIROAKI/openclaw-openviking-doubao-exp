@@ -25,7 +25,10 @@ from .experiment_spec import EXPECTED_CASE_COUNT, EXPECTED_SAMPLE_COUNT
 from .openviking_probe import capture_vlm_snapshot
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300") or "300")
-DEFAULT_RESET_TIMEOUT_SECONDS = float(os.environ.get("EXP_RESET_TIMEOUT_S", "30") or "30")
+DEFAULT_RESET_TIMEOUT_SECONDS = float(
+    os.environ.get("EXP_RESET_TIMEOUT_S", os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300"))
+    or os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300")
+)
 
 
 def format_locomo_message(msg: dict[str, Any]) -> str:
@@ -422,6 +425,16 @@ def _best_session_key(record: dict[str, Any] | None, user: str) -> str | None:
     return canonical_openresponses_session_key(user) if user else None
 
 
+def _gateway_timeout_ms(timeout_seconds: float) -> int:
+    try:
+        seconds = float(timeout_seconds)
+    except Exception:
+        seconds = DEFAULT_RESET_TIMEOUT_SECONDS
+    if seconds <= 0:
+        seconds = DEFAULT_RESET_TIMEOUT_SECONDS
+    return max(1000, int(round(seconds * 1000.0)))
+
+
 def _run_openclaw_gateway_call(
     *,
     openclaw_bin: Path,
@@ -430,12 +443,15 @@ def _run_openclaw_gateway_call(
     params: dict[str, Any],
     timeout_seconds: float,
 ) -> dict[str, Any]:
+    timeout_ms = _gateway_timeout_ms(timeout_seconds)
     cmd = [
         str(openclaw_bin),
         "gateway",
         "call",
         method,
         "--json",
+        "--timeout",
+        str(timeout_ms),
         "--params",
         json.dumps(params, ensure_ascii=False),
     ]
@@ -444,7 +460,7 @@ def _run_openclaw_gateway_call(
         capture_output=True,
         text=True,
         env=cli_env,
-        timeout=timeout_seconds,
+        timeout=max(float(timeout_seconds) + 5.0, 15.0),
     )
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
@@ -462,6 +478,7 @@ def _run_openclaw_gateway_call(
         raise RuntimeError(f"openclaw gateway call {method} returned ok=false: {body!r}")
     return {
         "argv": cmd,
+        "timeout_ms": timeout_ms,
         "stdout": stdout,
         "stderr": stderr,
         "body": body,
