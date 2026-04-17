@@ -294,6 +294,13 @@ def materialize_run_metrics(
     ingest_output_total = ingest_gateway_output + ingest_ov_output
     ingest_total_total = ingest_gateway_total + ingest_ov_total
 
+    ov_ingest_usage_observable = not (
+        group_id != "g2-noov-stock"
+        and isinstance(ov_snapshots.get("pre_ingest"), dict)
+        and isinstance(ov_snapshots.get("post_ingest"), dict)
+        and ingest_ov is None
+    )
+
     sample_ingest_row = {
         "run_id": run_id,
         "group_id": group_id,
@@ -319,6 +326,7 @@ def materialize_run_metrics(
         "post_reset_quiet_wait_ms": int(ingest_stage.get("post_reset_quiet_wait_ms", 0) or 0),
         "formal_usage_complete": bool(
             ingest_stage.get("formal_usage_complete", True)
+            and ov_ingest_usage_observable
             and not any(row.get("qa_ov_internal_input_tokens") is None for row in direct_rows if row.get("group_id") != "g2-noov-stock")
         ),
     }

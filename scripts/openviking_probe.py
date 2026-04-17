@@ -121,13 +121,34 @@ def extract_memory_total(detail: dict[str, Any] | None) -> int:
     return 0
 
 
-def latest_real_session(client: OpenVikingClient) -> tuple[str | None, dict[str, Any] | None]:
+def extract_commit_count(detail: dict[str, Any] | None) -> int:
+    if not isinstance(detail, dict):
+        return 0
+    value = detail.get("commit_count")
+    return int(value) if isinstance(value, int) else 0
+
+
+def context_has_archive_overview(context: dict[str, Any] | None) -> bool:
+    return (
+        isinstance(context, dict)
+        and isinstance(context.get("latest_archive_overview"), str)
+        and bool(context["latest_archive_overview"].strip())
+    )
+
+
+def _session_sort_key(item: dict[str, Any]) -> str:
+    return str(item.get("updated_at", "") or item.get("created_at", ""))
+
+
+def list_real_sessions(client: OpenVikingClient) -> list[dict[str, Any]]:
     sessions = client.list_sessions()
     candidates = [item for item in sessions if not str(item.get("session_id", "")).startswith("memory-store-")]
-    candidates.sort(
-        key=lambda item: str(item.get("updated_at", "") or item.get("created_at", "")),
-        reverse=True,
-    )
+    candidates.sort(key=_session_sort_key, reverse=True)
+    return candidates
+
+
+def latest_real_session(client: OpenVikingClient) -> tuple[str | None, dict[str, Any] | None]:
+    candidates = list_real_sessions(client)
     if not candidates:
         return None, None
     item = candidates[0]
@@ -203,16 +224,8 @@ def wait_for_commit_visibility(
     while time.time() < deadline:
         latest_detail = client.get_session(session_id)
         latest_context = client.get_context(session_id)
-        commit_ok = (
-            isinstance(latest_detail, dict)
-            and isinstance(latest_detail.get("commit_count"), int)
-            and latest_detail["commit_count"] > 0
-        )
-        overview_ok = (
-            isinstance(latest_context, dict)
-            and isinstance(latest_context.get("latest_archive_overview"), str)
-            and bool(latest_context["latest_archive_overview"].strip())
-        )
+        commit_ok = extract_commit_count(latest_detail) > 0
+        overview_ok = context_has_archive_overview(latest_context)
         memory_ok = extract_memory_total(latest_detail) > 0
         if commit_ok and overview_ok and memory_ok:
             return {
@@ -231,6 +244,103 @@ def wait_for_commit_visibility(
         "commit_ok": commit_ok,
         "overview_ok": overview_ok,
         "memory_ok": memory_ok,
+    }
+
+
+def wait_for_sessions_visibility(
+    *,
+    client: OpenVikingClient,
+    session_ids: list[str],
+    timeout_seconds: float = 300.0,
+    poll_seconds: float = 5.0,
+    require_any_memory: bool = True,
+    require_memory_for_each: bool = False,
+) -> dict[str, Any]:
+    unique_ids: list[str] = []
+    for session_id in session_ids:
+        sid = str(session_id or "").strip()
+        if sid and sid not in unique_ids:
+            unique_ids.append(sid)
+    if not unique_ids:
+        raise RuntimeError("No target OpenViking session ids were provided.")
+
+    deadline = time.time() + timeout_seconds
+    latest_per_session: list[dict[str, Any]] = []
+    all_commit_ok = False
+    all_overview_ok = False
+    any_memory_ok = False
+    all_memory_ok = False
+    total_memories_extracted = 0
+
+    while time.time() < deadline:
+        latest_per_session = []
+        all_commit_ok = True
+        all_overview_ok = True
+        total_memories_extracted = 0
+        all_memory_ok = True
+
+        for session_id in unique_ids:
+            detail: dict[str, Any] | None = None
+            context: dict[str, Any] | None = None
+            detail_error = ""
+            context_error = ""
+            try:
+                detail = client.get_session(session_id)
+            except Exception as exc:  # pragma: no cover - runtime network path
+                detail_error = str(exc)
+            try:
+                context = client.get_context(session_id)
+            except Exception as exc:  # pragma: no cover - runtime network path
+                context_error = str(exc)
+
+            commit_ok = extract_commit_count(detail) > 0
+            overview_ok = context_has_archive_overview(context)
+            memory_total = extract_memory_total(detail)
+            memory_ok = memory_total > 0
+            total_memories_extracted += memory_total
+            all_commit_ok = all_commit_ok and commit_ok
+            all_overview_ok = all_overview_ok and overview_ok
+            all_memory_ok = all_memory_ok and memory_ok
+            latest_per_session.append(
+                {
+                    "session_id": session_id,
+                    "detail": detail,
+                    "context": context,
+                    "detail_error": detail_error or None,
+                    "context_error": context_error or None,
+                    "commit_ok": commit_ok,
+                    "overview_ok": overview_ok,
+                    "memory_ok": memory_ok,
+                    "memory_total": memory_total,
+                }
+            )
+
+        any_memory_ok = total_memories_extracted > 0
+        memory_requirement_ok = (
+            all_memory_ok if require_memory_for_each else (True if not require_any_memory else any_memory_ok)
+        )
+        if all_commit_ok and all_overview_ok and memory_requirement_ok:
+            return {
+                "session_ids": unique_ids,
+                "per_session": latest_per_session,
+                "session_count": len(unique_ids),
+                "all_commit_ok": True,
+                "all_overview_ok": True,
+                "any_memory_ok": any_memory_ok,
+                "all_memory_ok": all_memory_ok,
+                "total_memories_extracted": total_memories_extracted,
+            }
+        time.sleep(poll_seconds)
+
+    return {
+        "session_ids": unique_ids,
+        "per_session": latest_per_session,
+        "session_count": len(unique_ids),
+        "all_commit_ok": all_commit_ok,
+        "all_overview_ok": all_overview_ok,
+        "any_memory_ok": any_memory_ok,
+        "all_memory_ok": all_memory_ok,
+        "total_memories_extracted": total_memories_extracted,
     }
 
 
@@ -278,6 +388,18 @@ def capture_snapshot(client: OpenVikingClient) -> dict[str, Any]:
     except Exception as exc:
         result["observer_queue_error"] = str(exc)
     try:
+        sessions = list_real_sessions(client)
+        result["real_session_count"] = len(sessions)
+        result["real_sessions"] = [
+            {
+                "session_id": str(item.get("session_id", "") or ""),
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+                "commit_count": extract_commit_count(item),
+                "memories_extracted_total": extract_memory_total(item),
+            }
+            for item in sessions
+        ]
         session_id, session_item = latest_real_session(client)
         result["latest_session_item"] = session_item
         result["latest_session_id"] = session_id

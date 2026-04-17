@@ -29,6 +29,7 @@ from .common import (
     iso_from_epoch,
     json_redact,
     load_lock_file,
+    openclaw_session_to_ov_storage_id,
     patch_openclaw_config,
     python_version_string,
     random_token,
@@ -61,7 +62,15 @@ from .experiment_spec import (
 )
 from .judge_harness import grade_answers
 from .metrics import materialize_run_metrics
-from .openviking_probe import OpenVikingClient, capture_snapshot, find_session_by_marker, latest_real_session, wait_for_commit_visibility
+from .openviking_probe import (
+    OpenVikingClient,
+    capture_snapshot,
+    find_session_by_marker,
+    latest_real_session,
+    list_real_sessions,
+    wait_for_commit_visibility,
+    wait_for_sessions_visibility,
+)
 from .summary import summarize
 
 
@@ -258,6 +267,20 @@ class ExperimentOrchestrator:
             "git": command_version(["git", "--version"]),
             "curl": command_version(["curl", "--version"]),
             "platform": platform.platform(),
+            "effective_env": {
+                "EXP_SKIP_SMOKE": os.environ.get("EXP_SKIP_SMOKE", "0"),
+                "EXP_SAMPLE_FILTER": os.environ.get("EXP_SAMPLE_FILTER", ""),
+                "EXP_GROUP_FILTER": os.environ.get("EXP_GROUP_FILTER", ""),
+                "EXP_RERUNS": os.environ.get("EXP_RERUNS", "1"),
+                "EXP_GATEWAY_REQUEST_TIMEOUT_S": os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300"),
+                "EXP_RESUME": os.environ.get("EXP_RESUME", "1"),
+                "OPENCLAW_PRIMARY_MODEL_REF": self.primary_model_ref,
+                "ARK_LLM_ENDPOINT_ID": self.ark_llm_endpoint_id,
+                "ARK_EMBEDDING_ENDPOINT_ID": self.ark_embedding_endpoint_id,
+                "EXP_WORKSPACE_ROOT": str(self.workspace_root),
+                "OPENCLAW_CLI_PREFIX": str(self.openclaw_cli_prefix),
+                "OPENVIKING_TOOL_VENV": str(self.openviking_tool_venv),
+            },
         }
         write_json(self.artifacts_root / "preflight.json", report)
         return report
@@ -788,6 +811,80 @@ class ExperimentOrchestrator:
             raise RuntimeError(f"Config preflight failed for {group_id}: {json.dumps(checks, ensure_ascii=False)}")
         return checks
 
+    def snapshot_session_ids(self, snapshot: dict[str, Any] | None) -> list[str]:
+        if not isinstance(snapshot, dict):
+            return []
+        rows = snapshot.get("real_sessions")
+        if not isinstance(rows, list):
+            return []
+        out: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            session_id = str(row.get("session_id", "") or "").strip()
+            if session_id and session_id not in out:
+                out.append(session_id)
+        return out
+
+    def resolve_ingest_ov_session_ids(
+        self,
+        *,
+        ingest_result: dict[str, Any],
+        ov_client: OpenVikingClient,
+        pre_ingest_snapshot: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        mapped: list[dict[str, Any]] = []
+        planned_ids: list[str] = []
+        for record in ingest_result.get("results", []) if isinstance(ingest_result.get("results"), list) else []:
+            if not isinstance(record, dict):
+                continue
+            session_id = str(record.get("session_id", "") or "").strip()
+            runtime_session_key = str(record.get("runtime_session_key", "") or "").strip()
+            if not session_id and not runtime_session_key:
+                continue
+            try:
+                ov_session_id = openclaw_session_to_ov_storage_id(session_id or None, runtime_session_key or None)
+                mapping_error = ""
+            except Exception as exc:
+                ov_session_id = ""
+                mapping_error = str(exc)
+            mapped.append(
+                {
+                    "openclaw_session_id": session_id or None,
+                    "runtime_session_key": runtime_session_key or None,
+                    "ov_session_id": ov_session_id or None,
+                    "mapping_error": mapping_error or None,
+                }
+            )
+            if ov_session_id and ov_session_id not in planned_ids:
+                planned_ids.append(ov_session_id)
+
+        before_ids = set(self.snapshot_session_ids(pre_ingest_snapshot))
+        observed_items = list_real_sessions(ov_client)
+        observed_ids: list[str] = []
+        for item in observed_items:
+            session_id = str(item.get("session_id", "") or "").strip()
+            if session_id and session_id not in observed_ids:
+                observed_ids.append(session_id)
+        observed_new = [session_id for session_id in observed_ids if session_id not in before_ids]
+
+        target_ids: list[str] = []
+        for session_id in planned_ids + observed_new:
+            if session_id and session_id not in target_ids:
+                target_ids.append(session_id)
+        if not target_ids:
+            for session_id in observed_new or observed_ids:
+                if session_id and session_id not in target_ids:
+                    target_ids.append(session_id)
+
+        return {
+            "mapped_from_ingest": mapped,
+            "planned_session_ids": planned_ids,
+            "observed_session_ids": observed_ids,
+            "observed_new_session_ids": observed_new,
+            "target_session_ids": target_ids,
+        }
+
     def capture_run_manifest(
         self,
         *,
@@ -1068,6 +1165,9 @@ class ExperimentOrchestrator:
                     start_iso = utc_now_iso_ms()
                     run_dir: Path | None = None
                     proc: subprocess.Popen[str] | None = None
+                    ov_snapshots: dict[str, Any] = {}
+                    observer_snapshot_path: Path | None = None
+                    openclaw_log_path: Path | None = None
                     try:
                         self.log(f"Running {run_id} ...")
                         self.assert_locked_versions(runtime_versions["openclaw_version"], runtime_versions["openviking_version"])
@@ -1089,7 +1189,6 @@ class ExperimentOrchestrator:
                             raise RuntimeError(f"{exc}\n" + detail)
 
                         ov_client: OpenVikingClient | None = None
-                        ov_snapshots: dict[str, Any] = {}
                         if is_ov_group(group_id):
                             ov_client = OpenVikingClient(
                                 base_url=f"http://127.0.0.1:{openviking_port}",
@@ -1121,27 +1220,82 @@ class ExperimentOrchestrator:
 
                         ov_barrier_wait_ms = 0
                         post_reset_quiet_wait_ms = 0
+                        ov_target_session_count = 0
                         if ov_client is not None:
                             time.sleep(4.0)
-                            ingest_session_id, _ = latest_real_session(ov_client)
-                            if not ingest_session_id:
-                                raise RuntimeError(f"No OpenViking session found after ingest for {run_id}")
-                            ov_snapshots["post_ingest_commit_request"] = ov_client.commit_session(ingest_session_id, wait=False)
-                            commit_result = ov_snapshots["post_ingest_commit_request"].get("result", ov_snapshots["post_ingest_commit_request"]) if isinstance(ov_snapshots["post_ingest_commit_request"], dict) else {}
-                            commit_status = str(commit_result.get("status", "") if isinstance(commit_result, dict) else "").lower()
-                            if commit_status and commit_status not in {"accepted", "running", "completed", "ok", "success"}:
-                                raise RuntimeError(f"OV commit not accepted for {run_id}: {json.dumps(ov_snapshots['post_ingest_commit_request'], ensure_ascii=False)}")
+                            ov_snapshots["post_ingest_precommit"] = capture_snapshot(ov_client)
+                            session_resolution = self.resolve_ingest_ov_session_ids(
+                                ingest_result=ingest_result,
+                                ov_client=ov_client,
+                                pre_ingest_snapshot=ov_snapshots.get("pre_ingest"),
+                            )
+                            target_session_ids = session_resolution.get("target_session_ids", []) if isinstance(session_resolution, dict) else []
+                            ov_target_session_count = len(target_session_ids) if isinstance(target_session_ids, list) else 0
+                            ov_snapshots["ingest_session_resolution"] = session_resolution
+                            if not target_session_ids:
+                                detail = self.build_health_failure_detail(openclaw_log_path=openclaw_log_path, run_dir=run_dir)
+                                raise RuntimeError(
+                                    f"No OpenViking sessions resolved after ingest for {run_id}: {json.dumps(session_resolution, ensure_ascii=False)}\n"
+                                    + detail
+                                )
+
+                            commit_requests: list[dict[str, Any]] = []
+                            commit_errors: list[dict[str, Any]] = []
+                            for ingest_session_id in target_session_ids:
+                                try:
+                                    commit_response = ov_client.commit_session(ingest_session_id, wait=False)
+                                    commit_result = commit_response.get("result", commit_response) if isinstance(commit_response, dict) else {}
+                                    commit_status = str(commit_result.get("status", "") if isinstance(commit_result, dict) else "").lower()
+                                    entry = {
+                                        "session_id": ingest_session_id,
+                                        "status": commit_status or None,
+                                        "response": commit_response,
+                                    }
+                                    commit_requests.append(entry)
+                                    if commit_status and commit_status not in {"accepted", "running", "completed", "ok", "success"}:
+                                        commit_errors.append(entry)
+                                except Exception as exc:
+                                    entry = {
+                                        "session_id": ingest_session_id,
+                                        "error": str(exc),
+                                    }
+                                    commit_requests.append(entry)
+                                    commit_errors.append(entry)
+                            ov_snapshots["post_ingest_commit_requests"] = commit_requests
+                            if commit_errors:
+                                detail = self.build_health_failure_detail(openclaw_log_path=openclaw_log_path, run_dir=run_dir)
+                                raise RuntimeError(
+                                    f"OV commit not accepted for {run_id}: {json.dumps(commit_errors, ensure_ascii=False)}\n"
+                                    + detail
+                                )
                             try:
-                                ov_snapshots["wait_processed"] = ov_client.wait_processed(timeout_seconds=60.0)
+                                ov_snapshots["wait_processed"] = ov_client.wait_processed(
+                                    timeout_seconds=max(60.0, 20.0 * float(max(1, ov_target_session_count)))
+                                )
                             except Exception as exc:
                                 ov_snapshots["wait_processed_error"] = str(exc)
                             barrier_start = time.time()
-                            barrier = wait_for_commit_visibility(client=ov_client, session_id=ingest_session_id, timeout_seconds=300.0)
+                            barrier = wait_for_sessions_visibility(
+                                client=ov_client,
+                                session_ids=target_session_ids,
+                                timeout_seconds=300.0,
+                                require_any_memory=True,
+                                require_memory_for_each=False,
+                            )
                             barrier_end = time.time()
                             ov_barrier_wait_ms = elapsed_ms(barrier_start, barrier_end)
                             ov_snapshots["post_ingest_barrier"] = barrier
-                            if not (barrier.get("commit_ok") and barrier.get("overview_ok") and barrier.get("memory_ok")):
-                                raise RuntimeError(f"OV barrier failed for {run_id}")
+                            barrier_ok = bool(
+                                barrier.get("all_commit_ok")
+                                and barrier.get("all_overview_ok")
+                                and barrier.get("any_memory_ok")
+                            )
+                            if not barrier_ok:
+                                detail = self.build_health_failure_detail(openclaw_log_path=openclaw_log_path, run_dir=run_dir)
+                                raise RuntimeError(
+                                    f"OV barrier failed for {run_id}: {json.dumps(barrier, ensure_ascii=False)}\n"
+                                    + detail
+                                )
                             ov_snapshots["post_ingest"] = capture_snapshot(ov_client)
                         else:
                             post_reset_quiet_wait_ms = quiet_wait_ms
@@ -1152,6 +1306,7 @@ class ExperimentOrchestrator:
                             "ingest_end_ts": iso_from_epoch(ingest_end_epoch),
                             "ingest_elapsed_ms": elapsed_ms(ingest_start_epoch, ingest_end_epoch),
                             "ov_barrier_wait_ms": ov_barrier_wait_ms,
+                            "ov_target_session_count": ov_target_session_count,
                             "post_reset_quiet_wait_ms": post_reset_quiet_wait_ms,
                             "config_preflight_checks": config_checks,
                             "formal_usage_complete": True,
@@ -1174,7 +1329,6 @@ class ExperimentOrchestrator:
                         if ov_client is not None:
                             ov_snapshots["post_run"] = capture_snapshot(ov_client)
 
-                        observer_snapshot_path: Path | None = None
                         if ov_snapshots:
                             observer_snapshot_path = self.raw_root / "observer" / group_id / f"{sample_id}__r{rerun}.json"
                             write_json(observer_snapshot_path, ov_snapshots)
@@ -1247,6 +1401,9 @@ class ExperimentOrchestrator:
                         completed_run_ids.append(run_id)
                     except Exception as exc:
                         end_iso = utc_now_iso_ms()
+                        if ov_snapshots and observer_snapshot_path is None:
+                            observer_snapshot_path = self.raw_root / "observer" / group_id / f"{sample_id}__r{rerun}.json"
+                            write_json(observer_snapshot_path, ov_snapshots)
                         failure_manifest = {
                             "run_id": run_id,
                             "group_id": group_id,
@@ -1261,11 +1418,17 @@ class ExperimentOrchestrator:
                             "success": False,
                             "formal_valid": False,
                             "error": str(exc),
+                            "openclaw_log": str(openclaw_log_path) if openclaw_log_path else None,
+                            "openviking_log": str(self.logs_root / "openviking" / group_id / f"{sample_id}__r{rerun}.log"),
+                            "observer_snapshot": str(observer_snapshot_path) if observer_snapshot_path else None,
                         }
                         write_json(self.manifests_root / f"{run_id}.json", failure_manifest)
                         raise
                     finally:
                         self.stop_gateway(proc)
+                        if ov_snapshots and observer_snapshot_path is None:
+                            observer_snapshot_path = self.raw_root / "observer" / group_id / f"{sample_id}__r{rerun}.json"
+                            write_json(observer_snapshot_path, ov_snapshots)
                         if run_dir is not None:
                             target_ov_log = self.logs_root / "openviking" / group_id / f"{sample_id}__r{rerun}.log"
                             self.copy_openviking_logs(run_dir, target_ov_log)

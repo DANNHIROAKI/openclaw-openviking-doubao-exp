@@ -171,6 +171,34 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+OPENVIKING_OV_SESSION_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+WINDOWS_BAD_SESSION_SEGMENT = re.compile(r'[:<>"/\\|?*]')
+
+
+def openclaw_session_to_ov_storage_id(session_id: str | None, session_key: str | None = None) -> str:
+    """Mirror the OpenClaw plugin's sessionId -> OV storage id mapping.
+
+    TS source of truth (vendored plugin):
+    - UUID sessionId => lowercase UUID
+    - else if sessionKey exists => sha256(sessionKey)
+    - else if sessionId contains Windows-hostile chars => sha256("openclaw-session:" + sessionId)
+    - else => raw sessionId
+    """
+    sid = (session_id or "").strip()
+    key = (session_key or "").strip()
+    if sid and OPENVIKING_OV_SESSION_UUID.fullmatch(sid):
+        return sid.lower()
+    if key:
+        return sha256_text(key)
+    if sid:
+        if WINDOWS_BAD_SESSION_SEGMENT.search(sid):
+            return sha256_text(f"openclaw-session:{sid}")
+        return sid
+    raise RuntimeError("Need session_id or session_key to derive OpenViking session id.")
+
+
 def copytree_clean(src: Path, dst: Path) -> None:
     if dst.exists():
         shutil.rmtree(dst)

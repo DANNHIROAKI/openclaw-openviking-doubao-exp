@@ -347,13 +347,28 @@ def sessions_dir(openclaw_home: Path) -> Path:
     return openclaw_home / "agents" / "main" / "sessions"
 
 
-def get_session_id(openclaw_home: Path, user: str) -> str | None:
+def get_session_record(openclaw_home: Path, user: str) -> dict[str, Any] | None:
     path = sessions_file(openclaw_home)
     if not path.exists():
         return None
     data = read_json(path, default={})
     if not isinstance(data, dict):
         return None
+
+    def normalize(value: dict[str, Any], key: str | None = None) -> dict[str, Any] | None:
+        session_id = value.get("sessionId")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return None
+        session_key = value.get("sessionKey")
+        user_value = value.get("user")
+        return {
+            "session_id": session_id.strip(),
+            "session_key": session_key.strip() if isinstance(session_key, str) and session_key.strip() else None,
+            "user": user_value.strip() if isinstance(user_value, str) and user_value.strip() else None,
+            "lookup_key": key or None,
+            "raw": value,
+        }
+
     candidate_keys = [
         f"agent:main:openresponses-user:{user}",
         user,
@@ -363,24 +378,33 @@ def get_session_id(openclaw_home: Path, user: str) -> str | None:
     for key in candidate_keys:
         value = data.get(key)
         if isinstance(value, dict):
-            session_id = value.get("sessionId")
-            if isinstance(session_id, str) and session_id:
-                return session_id
+            normalized = normalize(value, key)
+            if normalized is not None:
+                return normalized
+
     for key, value in data.items():
         if not isinstance(value, dict):
             continue
-        session_id = value.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
+        normalized = normalize(value, key)
+        if normalized is None:
             continue
-        session_key = value.get("sessionKey")
+        session_key = normalized.get("session_key")
+        user_value = normalized.get("user")
         if isinstance(session_key, str) and session_key == user:
-            return session_id
-        user_value = value.get("user")
+            return normalized
         if isinstance(user_value, str) and user_value == user:
-            return session_id
+            return normalized
         if isinstance(key, str) and key.endswith(f":{user}"):
-            return session_id
+            return normalized
     return None
+
+
+def get_session_id(openclaw_home: Path, user: str) -> str | None:
+    record = get_session_record(openclaw_home, user)
+    if not isinstance(record, dict):
+        return None
+    session_id = record.get("session_id")
+    return str(session_id).strip() or None
 
 
 def reset_session(openclaw_home: Path, session_id: str) -> Path | None:
@@ -474,7 +498,9 @@ def ingest_sample(
             raise RuntimeError(f"Ingest failed for {sample_id} turn {idx}: {response['error']}")
         for key in usage_total:
             usage_total[key] += int(response["usage"].get(key, 0) or 0)
-        current_session_id = get_session_id(openclaw_home, user)
+        session_record = get_session_record(openclaw_home, user)
+        current_session_id = session_record.get("session_id") if isinstance(session_record, dict) else None
+        current_session_key = session_record.get("session_key") if isinstance(session_record, dict) else None
         archived = reset_session(openclaw_home, current_session_id) if current_session_id else None
         records.append(
             {
@@ -490,6 +516,7 @@ def ingest_sample(
                 "gateway_model_id": response.get("model", ""),
                 "gateway_response": response["body"],
                 "session_id": current_session_id,
+                "runtime_session_key": current_session_key,
                 "archived_session_file": str(archived) if archived else None,
                 "request_start_ts": response["request_start_ts"],
                 "request_end_ts": response["request_end_ts"],
@@ -551,7 +578,9 @@ async def qa_sample_async(
         for key in usage_total:
             usage_total[key] += int(response["usage"].get(key, 0) or 0)
 
-        current_session_id = get_session_id(openclaw_home, user)
+        session_record = get_session_record(openclaw_home, user)
+        current_session_id = session_record.get("session_id") if isinstance(session_record, dict) else None
+        current_session_key = session_record.get("session_key") if isinstance(session_record, dict) else None
         archived = reset_session(openclaw_home, current_session_id) if current_session_id else None
         ov_delta = _ov_usage_delta(ov_before, ov_after)
         record = {
@@ -572,6 +601,7 @@ async def qa_sample_async(
             "gateway_model_id": response.get("model", ""),
             "gateway_response": response["body"],
             "session_id": current_session_id,
+            "runtime_session_key": current_session_key,
             "archived_session_file": str(archived) if archived else None,
             "error": response.get("error"),
             "qa_error_flag": bool(response.get("error")),
