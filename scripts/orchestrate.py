@@ -868,11 +868,14 @@ class ExperimentOrchestrator:
                 observed_ids.append(session_id)
         observed_new = [session_id for session_id in observed_ids if session_id not in before_ids]
 
+        unexpected_observed_new = [session_id for session_id in observed_new if session_id not in planned_ids]
+
         target_ids: list[str] = []
-        for session_id in planned_ids + observed_new:
-            if session_id and session_id not in target_ids:
-                target_ids.append(session_id)
-        if not target_ids:
+        if planned_ids:
+            for session_id in planned_ids:
+                if session_id and session_id not in target_ids:
+                    target_ids.append(session_id)
+        else:
             for session_id in observed_new or observed_ids:
                 if session_id and session_id not in target_ids:
                     target_ids.append(session_id)
@@ -882,6 +885,7 @@ class ExperimentOrchestrator:
             "planned_session_ids": planned_ids,
             "observed_session_ids": observed_ids,
             "observed_new_session_ids": observed_new,
+            "unexpected_observed_new_session_ids": unexpected_observed_new,
             "target_session_ids": target_ids,
         }
 
@@ -1216,6 +1220,8 @@ class ExperimentOrchestrator:
                             token=self.gateway_token,
                             openclaw_home=run_state_dir,
                             output_json=ingest_output,
+                            reset_cli_bin=self.openclaw_cli_prefix / "bin" / "openclaw",
+                            reset_cli_env=run_env,
                         )
 
                         ov_barrier_wait_ms = 0
@@ -1229,6 +1235,20 @@ class ExperimentOrchestrator:
                                 ov_client=ov_client,
                                 pre_ingest_snapshot=ov_snapshots.get("pre_ingest"),
                             )
+                            planned_ids = session_resolution.get("planned_session_ids", []) if isinstance(session_resolution, dict) else []
+                            if isinstance(planned_ids, list):
+                                distinct_planned_ids = [sid for sid in planned_ids if isinstance(sid, str) and sid.strip()]
+                            else:
+                                distinct_planned_ids = []
+                            expected_ingest_sessions = int(ingest_result.get("session_count", 0) or 0)
+                            if expected_ingest_sessions > 0 and distinct_planned_ids and len(distinct_planned_ids) < expected_ingest_sessions:
+                                detail = self.build_health_failure_detail(openclaw_log_path=openclaw_log_path, run_dir=run_dir)
+                                raise RuntimeError(
+                                    f"Gateway session reset ineffective for {run_id}: expected {expected_ingest_sessions} distinct ingest sessions, "
+                                    f"but resolved only {len(distinct_planned_ids)} planned OpenViking session ids. "
+                                    f"Resolution={json.dumps(session_resolution, ensure_ascii=False)}\n"
+                                    + detail
+                                )
                             target_session_ids = session_resolution.get("target_session_ids", []) if isinstance(session_resolution, dict) else []
                             ov_target_session_count = len(target_session_ids) if isinstance(target_session_ids, list) else 0
                             ov_snapshots["ingest_session_resolution"] = session_resolution
@@ -1323,6 +1343,8 @@ class ExperimentOrchestrator:
                                 openclaw_home=run_state_dir,
                                 output_jsonl=qa_output,
                                 ov_client=ov_client if is_ov_group(group_id) else None,
+                                reset_cli_bin=self.openclaw_cli_prefix / "bin" / "openclaw",
+                                reset_cli_env=run_env,
                             )
                         )
 

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ from .experiment_spec import EXPECTED_CASE_COUNT, EXPECTED_SAMPLE_COUNT
 from .openviking_probe import capture_vlm_snapshot
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("EXP_GATEWAY_REQUEST_TIMEOUT_S", "300") or "300")
+DEFAULT_RESET_TIMEOUT_SECONDS = float(os.environ.get("EXP_RESET_TIMEOUT_S", "30") or "30")
 
 
 def format_locomo_message(msg: dict[str, Any]) -> str:
@@ -407,13 +409,139 @@ def get_session_id(openclaw_home: Path, user: str) -> str | None:
     return str(session_id).strip() or None
 
 
-def reset_session(openclaw_home: Path, session_id: str) -> Path | None:
-    src = sessions_dir(openclaw_home) / f"{session_id}.jsonl"
-    if not src.exists():
+def canonical_openresponses_session_key(user: str) -> str:
+    return f"agent:main:openresponses-user:{user}"
+
+
+def _best_session_key(record: dict[str, Any] | None, user: str) -> str | None:
+    if isinstance(record, dict):
+        for key in ("session_key", "lookup_key"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return canonical_openresponses_session_key(user) if user else None
+
+
+def _run_openclaw_gateway_call(
+    *,
+    openclaw_bin: Path,
+    cli_env: dict[str, str],
+    method: str,
+    params: dict[str, Any],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    cmd = [
+        str(openclaw_bin),
+        "gateway",
+        "call",
+        method,
+        "--json",
+        "--params",
+        json.dumps(params, ensure_ascii=False),
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=cli_env,
+        timeout=timeout_seconds,
+    )
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    body: Any
+    try:
+        body = json.loads(stdout) if stdout else {}
+    except Exception:
+        body = {"raw_stdout": stdout}
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"openclaw gateway call {method} failed with exit={proc.returncode}: "
+            f"stdout={stdout[:1200]!r} stderr={stderr[:1200]!r}"
+        )
+    if isinstance(body, dict) and body.get("ok") is False:
+        raise RuntimeError(f"openclaw gateway call {method} returned ok=false: {body!r}")
+    return {
+        "argv": cmd,
+        "stdout": stdout,
+        "stderr": stderr,
+        "body": body,
+    }
+
+
+def _wait_for_session_rotation(
+    *,
+    openclaw_home: Path,
+    user: str,
+    previous_session_id: str | None,
+    timeout_seconds: float = DEFAULT_RESET_TIMEOUT_SECONDS,
+) -> dict[str, Any] | None:
+    deadline = time.time() + timeout_seconds
+    last_record: dict[str, Any] | None = None
+    while time.time() < deadline:
+        record = get_session_record(openclaw_home, user)
+        if isinstance(record, dict):
+            last_record = record
+            current_id = str(record.get("session_id", "") or "").strip()
+            if previous_session_id:
+                if current_id and current_id != previous_session_id:
+                    return record
+            elif current_id:
+                return record
+        time.sleep(0.2)
+    return last_record
+
+
+def reset_session(
+    *,
+    openclaw_home: Path,
+    user: str,
+    session_id: str | None,
+    session_key: str | None,
+    reset_cli_bin: Path | None = None,
+    reset_cli_env: dict[str, str] | None = None,
+    timeout_seconds: float = DEFAULT_RESET_TIMEOUT_SECONDS,
+) -> dict[str, Any] | None:
+    current_record = get_session_record(openclaw_home, user)
+    key = (session_key or _best_session_key(current_record, user) or "").strip()
+    previous_session_id = str(session_id or "").strip() or None
+    if not key and not previous_session_id:
         return None
-    dst = src.with_name(f"{src.name}.{int(time.time())}")
-    src.rename(dst)
-    return dst
+    if reset_cli_bin is None or reset_cli_env is None:
+        raise RuntimeError(
+            "Formal benchmark reset now requires a real Gateway sessions.reset call; "
+            "reset_cli_bin/reset_cli_env were not provided."
+        )
+
+    rpc = _run_openclaw_gateway_call(
+        openclaw_bin=reset_cli_bin,
+        cli_env=reset_cli_env,
+        method="sessions.reset",
+        params={"key": key, "reason": "new"},
+        timeout_seconds=timeout_seconds,
+    )
+    rotated_record = _wait_for_session_rotation(
+        openclaw_home=openclaw_home,
+        user=user,
+        previous_session_id=previous_session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    next_session_id = None
+    next_session_key = None
+    if isinstance(rotated_record, dict):
+        next_session_id = str(rotated_record.get("session_id", "") or "").strip() or None
+        next_session_key = str(rotated_record.get("session_key", "") or "").strip() or None
+    if previous_session_id and next_session_id == previous_session_id:
+        raise RuntimeError(
+            f"sessions.reset did not rotate session id for key={key}: old={previous_session_id} new={next_session_id}"
+        )
+    return {
+        "method": "gateway.sessions.reset",
+        "request": {"key": key, "reason": "new"},
+        "rpc": rpc,
+        "previous_session_id": previous_session_id,
+        "next_session_id": next_session_id,
+        "next_session_key": next_session_key,
+    }
 
 
 def parse_session_range(value: str | None) -> tuple[int, int] | None:
@@ -478,6 +606,8 @@ def ingest_sample(
     openclaw_home: Path,
     output_json: Path,
     sessions_value: str | None = None,
+    reset_cli_bin: Path | None = None,
+    reset_cli_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     sample = load_locomo_data(dataset_path, sample_index)[0]
     sample_id = canonical_sample_id(sample, sample_index)
@@ -501,7 +631,15 @@ def ingest_sample(
         session_record = get_session_record(openclaw_home, user)
         current_session_id = session_record.get("session_id") if isinstance(session_record, dict) else None
         current_session_key = session_record.get("session_key") if isinstance(session_record, dict) else None
-        archived = reset_session(openclaw_home, current_session_id) if current_session_id else None
+        session_lookup_key = session_record.get("lookup_key") if isinstance(session_record, dict) else None
+        reset_result = reset_session(
+            openclaw_home=openclaw_home,
+            user=user,
+            session_id=current_session_id,
+            session_key=current_session_key or session_lookup_key,
+            reset_cli_bin=reset_cli_bin,
+            reset_cli_env=reset_cli_env,
+        ) if (current_session_id or current_session_key or session_lookup_key) else None
         records.append(
             {
                 "sample_id": sample_id,
@@ -517,7 +655,9 @@ def ingest_sample(
                 "gateway_response": response["body"],
                 "session_id": current_session_id,
                 "runtime_session_key": current_session_key,
-                "archived_session_file": str(archived) if archived else None,
+                "runtime_session_lookup_key": session_lookup_key,
+                "archived_session_file": None,
+                "reset": reset_result,
                 "request_start_ts": response["request_start_ts"],
                 "request_end_ts": response["request_end_ts"],
                 "request_elapsed_ms": response["elapsed_ms"],
@@ -555,6 +695,8 @@ async def qa_sample_async(
     output_jsonl: Path,
     ov_client: Any | None = None,
     retries: int = 2,
+    reset_cli_bin: Path | None = None,
+    reset_cli_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     sample = load_locomo_data(dataset_path, sample_index)[0]
     sample_id = canonical_sample_id(sample, sample_index)
@@ -581,7 +723,15 @@ async def qa_sample_async(
         session_record = get_session_record(openclaw_home, user)
         current_session_id = session_record.get("session_id") if isinstance(session_record, dict) else None
         current_session_key = session_record.get("session_key") if isinstance(session_record, dict) else None
-        archived = reset_session(openclaw_home, current_session_id) if current_session_id else None
+        session_lookup_key = session_record.get("lookup_key") if isinstance(session_record, dict) else None
+        reset_result = reset_session(
+            openclaw_home=openclaw_home,
+            user=user,
+            session_id=current_session_id,
+            session_key=current_session_key or session_lookup_key,
+            reset_cli_bin=reset_cli_bin,
+            reset_cli_env=reset_cli_env,
+        ) if (current_session_id or current_session_key or session_lookup_key) else None
         ov_delta = _ov_usage_delta(ov_before, ov_after)
         record = {
             "sample_id": sample_id,
@@ -602,7 +752,9 @@ async def qa_sample_async(
             "gateway_response": response["body"],
             "session_id": current_session_id,
             "runtime_session_key": current_session_key,
-            "archived_session_file": str(archived) if archived else None,
+            "runtime_session_lookup_key": session_lookup_key,
+            "archived_session_file": None,
+            "reset": reset_result,
             "error": response.get("error"),
             "qa_error_flag": bool(response.get("error")),
             "qa_start_ts": response["request_start_ts"],
